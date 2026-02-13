@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(grep:*)",
+      "Bash(python:*)",
+      "Bash(conda activate:*)",
+      "Bash(dir:*)"
+    ]
+  }
+}
