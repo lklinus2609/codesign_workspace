@@ -16,3 +16,8 @@ tqdm
 cloudpickle
 protobuf
 requests
+warp-lang
+moviepy
+pyglet
+mujoco-warp
+-e ./newton
