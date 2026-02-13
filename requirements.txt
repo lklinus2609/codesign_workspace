@@ -9,7 +9,7 @@ wandb
 tensorboardx
 matplotlib
 trimesh
-mujoco
+mujoco==3.2.7
 pydantic
 gymnasium
 tqdm
