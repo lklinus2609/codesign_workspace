@@ -1,0 +1,10 @@
+[submodule "codesign"]
+	path = codesign
+	url = https://github.com/lklinus2609/codesign.git
+[submodule "MimicKit"]
+	path = MimicKit
+	url = https://github.com/lklinus2609/MimicKit.git
+	branch = codesign-fixes
+[submodule "newton"]
+	path = newton
+	url = https://github.com/newton-physics/newton.git

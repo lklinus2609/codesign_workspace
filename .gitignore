@@ -1,0 +1,9 @@
+output/
+wandb/
+unitree_rl_gym/
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+*.log
+nul
