@@ -350,6 +350,9 @@ def main(args):
     }
     theta_history = deque(maxlen=5)
 
+    # Create BPTT functions once (JIT cache persists across outer iterations)
+    bptt_fns = make_bptt_fns(mjx_model, mj_model, metadata)
+
     print(f"Configuration:")
     print(f"  Training envs:     {args.num_envs}")
     print(f"  Eval envs:         {args.num_eval_envs}")
@@ -431,7 +434,6 @@ def main(args):
         print(f"\n  [BPTT] Computing gradient via jax.grad(mjx.step)...")
         t0_bptt = time.time()
 
-        bptt_fns = make_bptt_fns(mjx_model, mj_model, metadata)
         grad_theta_jax, mean_fwd_dist, mean_cot = compute_bptt_gradient(
             bptt_fns, theta_jax, actions_batch, init_qpos_batch,
         )
