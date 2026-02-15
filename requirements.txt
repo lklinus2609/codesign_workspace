@@ -10,6 +10,10 @@ tensorboardx
 matplotlib
 trimesh
 mujoco>=3.4.0
+mujoco-mjx
+jax[cuda12]
+flax
+optax
 pydantic
 gymnasium
 tqdm
