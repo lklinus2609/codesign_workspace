@@ -96,35 +96,27 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
         }
         return cot, info
 
-    def bptt_loss(theta, actions, init_qpos):
-        """Scalar loss for jax.grad (drops info)."""
-        cot, _ = bptt_loss_with_info(theta, actions, init_qpos)
-        return cot
-
-    # Single-rollout gradient + value (one forward + one backward pass)
-    grad_and_value_fn = jax.value_and_grad(bptt_loss, argnums=0)
+    # has_aux=True: grad of cot, carry info through as auxiliary output
+    # This avoids a redundant second forward pass to get info
+    grad_fn = jax.value_and_grad(bptt_loss_with_info, argnums=0, has_aux=True)
 
     # Batched: vmap over (actions, init_qpos), shared theta
-    batched_grad_and_value_fn = jax.vmap(
-        grad_and_value_fn, in_axes=(None, 0, 0)
-    )
-    batched_loss_with_info = jax.vmap(
-        bptt_loss_with_info, in_axes=(None, 0, 0)
-    )
+    batched_grad_fn = jax.vmap(grad_fn, in_axes=(None, 0, 0))
+
+    # JIT the full batched computation for faster subsequent calls
+    batched_grad_fn_jit = jax.jit(batched_grad_fn)
 
     return {
-        "loss_fn": bptt_loss,
         "loss_with_info_fn": bptt_loss_with_info,
-        "grad_and_value_fn": grad_and_value_fn,
-        "batched_grad_and_value_fn": batched_grad_and_value_fn,
-        "batched_loss_with_info_fn": batched_loss_with_info,
+        "grad_fn": grad_fn,
+        "batched_grad_fn": batched_grad_fn_jit,
     }
 
 
 def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
     """Compute mean BPTT gradient over a batch of rollouts.
 
-    Uses value_and_grad to avoid double forward pass.
+    Single forward+backward pass via value_and_grad with has_aux=True.
 
     Args:
         bptt_fns: dict from make_bptt_fns()
@@ -133,18 +125,12 @@ def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
         init_qpos_batch: (B, nq) initial configurations
 
     Returns:
-        mean_grad: (6,) mean gradient (numpy)
+        mean_grad: (6,) mean gradient
         mean_fwd_dist: scalar mean forward distance
         mean_cot: scalar mean Cost of Transport
     """
-    # Compute per-rollout CoT values and gradients in one pass
-    cot_values, grads = bptt_fns["batched_grad_and_value_fn"](
-        theta, actions_batch, init_qpos_batch
-    )
-
-    # Also get info (forward distances etc.) - this is a second forward pass
-    # but it's cheap relative to the backward pass
-    _, infos = bptt_fns["batched_loss_with_info_fn"](
+    # Single pass: (cot_values, infos), grads — no redundant forward pass
+    (cot_values, infos), grads = bptt_fns["batched_grad_fn"](
         theta, actions_batch, init_qpos_batch
     )
 
