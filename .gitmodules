@@ -7,4 +7,5 @@
 	branch = codesign-fixes
 [submodule "newton"]
 	path = newton
-	url = https://github.com/newton-physics/newton.git
+	url = https://github.com/lklinus2609/newton.git
+	branch = stable-solver
