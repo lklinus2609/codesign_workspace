@@ -72,13 +72,17 @@ def make_simple_loss_fn(mjx_model, mj_model, metadata):
 
 def fd_gradient(loss_fn, theta, *args, eps=1e-4):
     """Central finite difference gradient."""
-    grad = np.zeros_like(theta)
-    for i in range(len(theta)):
+    n = len(theta)
+    grad = np.zeros(n)
+    for i in range(n):
         theta_plus = theta.at[i].set(theta[i] + eps)
         theta_minus = theta.at[i].set(theta[i] - eps)
         f_plus = float(loss_fn(theta_plus, *args))
         f_minus = float(loss_fn(theta_minus, *args))
         grad[i] = (f_plus - f_minus) / (2 * eps)
+        print(f"        FD param {i+1}/{n}: "
+              f"f+={f_plus:.8f}, f-={f_minus:.8f}, "
+              f"grad={grad[i]:.8f}", flush=True)
     return grad
 
 
@@ -89,15 +93,21 @@ def run_test(name, loss_fn, theta, actions, init_qpos, eps=1e-4):
     print(f"{'='*60}")
 
     # Analytical gradient via jax.grad
+    print(f"  [1/2] Computing jax.grad (JIT compiling on first call)...",
+          flush=True)
     t0 = time.time()
     grad_fn = jax.grad(loss_fn, argnums=0)
     grad_analytical = np.asarray(grad_fn(theta, actions, init_qpos))
     t_analytical = time.time() - t0
+    print(f"  [1/2] Done in {t_analytical:.1f}s")
 
     # Finite difference gradient
+    print(f"  [2/2] Computing FD gradient (12 forward passes)...",
+          flush=True)
     t0 = time.time()
     grad_fd = fd_gradient(loss_fn, theta, actions, init_qpos, eps=eps)
     t_fd = time.time() - t0
+    print(f"  [2/2] Done in {t_fd:.1f}s")
 
     # Compare
     print(f"\n  {'Param':<8} {'Analytical':>14} {'FD':>14} {'Ratio':>10} {'Status':>8}")
@@ -177,6 +187,18 @@ def main():
     rng = jax.random.PRNGKey(123)
     theta = jnp.array([0.05, -0.03, 0.02, -0.04, 0.01, -0.02])
     init_qpos = default_qpos
+
+    # Warmup: JIT compile the forward pass with a tiny rollout
+    print("\nWarmup: JIT compiling forward pass...", flush=True)
+    t0 = time.time()
+    warmup_actions = jnp.zeros((3, metadata["num_actuators"]))
+    _ = height_loss_fn(theta, warmup_actions, init_qpos)
+    print(f"Warmup forward done in {time.time() - t0:.1f}s", flush=True)
+
+    print("Warmup: JIT compiling jax.grad...", flush=True)
+    t0 = time.time()
+    _ = jax.grad(height_loss_fn)(theta, warmup_actions, init_qpos)
+    print(f"Warmup grad done in {time.time() - t0:.1f}s", flush=True)
 
     results = []
 
