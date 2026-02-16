@@ -27,6 +27,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import mujoco
 import numpy as np
 
@@ -125,7 +126,8 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
                    ppo_train_fns, obs_rms, rng,
                    ppo_cfg, gate, max_samples=200_000_000,
                    log_every=10, use_wandb=False, logger=None,
-                   mj_model=None, video_every=100):
+                   mj_model=None, video_every=100,
+                   env_sharding=None):
     """Train PPO until convergence or sample cap.
 
     Args:
@@ -143,6 +145,7 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
         logger: PGHCLogger instance
         mj_model: mujoco.MjModel for video rendering (optional)
         video_every: record video every N rollouts (0 to disable)
+        env_sharding: NamedSharding for distributing envs across GPUs
 
     Returns:
         policy_params, value_params, opt_state, obs_rms, metrics, converged
@@ -159,6 +162,9 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
     # Reset environments
     rng, rng_reset = jax.random.split(rng)
     rng_envs = jax.random.split(rng_reset, num_envs)
+    # Shard RNG keys across devices before reset (triggers parallel reset)
+    if env_sharding is not None:
+        rng_envs = jax.device_put(rng_envs, env_sharding)
     env_states, obs_batch = env_fns["reset"](rng_envs)
 
     gate.reset()
@@ -184,6 +190,9 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
             # Sample actions
             rng, rng_act = jax.random.split(rng)
             rng_acts = jax.random.split(rng_act, num_envs)
+            if env_sharding is not None:
+                rng_acts = jax.device_put(rng_acts, env_sharding)
+                obs_norm = jax.device_put(obs_norm, env_sharding)
             actions, log_probs = jax.vmap(
                 sample_action, in_axes=(None, None, 0, 0)
             )(policy_apply, policy_params, obs_norm, rng_acts)
@@ -302,7 +311,8 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
 # ---------------------------------------------------------------------------
 
 def collect_eval_actions(env_fns, policy_apply, policy_params, obs_rms,
-                         num_eval_envs, eval_horizon, rng):
+                         num_eval_envs, eval_horizon, rng,
+                         env_sharding=None):
     """Collect deterministic actions from frozen policy for BPTT.
 
     Args:
@@ -313,6 +323,7 @@ def collect_eval_actions(env_fns, policy_apply, policy_params, obs_rms,
         num_eval_envs: number of evaluation environments
         eval_horizon: number of steps to collect
         rng: PRNGKey
+        env_sharding: NamedSharding for multi-GPU distribution
 
     Returns:
         actions: (eval_horizon, num_eval_envs, act_dim) action array
@@ -320,6 +331,8 @@ def collect_eval_actions(env_fns, policy_apply, policy_params, obs_rms,
     """
     rng, rng_reset = jax.random.split(rng)
     rng_envs = jax.random.split(rng_reset, num_eval_envs)
+    if env_sharding is not None:
+        rng_envs = jax.device_put(rng_envs, env_sharding)
     env_states, obs_batch = env_fns["reset"](rng_envs)
 
     # Save initial qpos for BPTT
@@ -368,10 +381,33 @@ def main(args):
             config=vars(args),
         )
 
-    # JAX device info
+    # JAX device info + multi-GPU sharding
     devices = jax.devices()
+    num_devices = len(devices)
     print(f"  JAX devices: {devices}")
     print(f"  JAX backend: {jax.default_backend()}")
+
+    # Create mesh for data-parallel sharding across all GPUs
+    mesh = Mesh(np.array(devices), axis_names=('d',))
+    # Shard batch dimension across devices
+    env_sharding = NamedSharding(mesh, P('d'))
+    # Replicate (no sharding) for params, scalars
+    replicated = NamedSharding(mesh, P())
+
+    # Ensure num_envs is divisible by num_devices
+    if args.num_envs % num_devices != 0:
+        old = args.num_envs
+        args.num_envs = (args.num_envs // num_devices) * num_devices
+        print(f"  [Warning] Adjusted num_envs {old} -> {args.num_envs} "
+              f"(divisible by {num_devices} devices)")
+    if args.num_eval_envs % num_devices != 0:
+        old = args.num_eval_envs
+        args.num_eval_envs = (args.num_eval_envs // num_devices) * num_devices
+        print(f"  [Warning] Adjusted num_eval_envs {old} -> {args.num_eval_envs} "
+              f"(divisible by {num_devices} devices)")
+
+    print(f"  Multi-GPU: {num_devices} devices, "
+          f"{args.num_envs // num_devices} envs/device")
 
     # =====================================================================
     # 1. Load model
@@ -510,6 +546,7 @@ def main(args):
             logger=logger,
             mj_model=mj_model,
             video_every=args.video_every,
+            env_sharding=env_sharding,
         )
 
         inner_time = time.time() - t0
@@ -529,6 +566,7 @@ def main(args):
         actions_batch, init_qpos_batch = collect_eval_actions(
             eval_env_fns, policy_apply, policy_params, obs_rms,
             args.num_eval_envs, args.eval_horizon, rng_eval,
+            env_sharding=env_sharding,
         )
         print(f"    Got actions: {actions_batch.shape}")
 
