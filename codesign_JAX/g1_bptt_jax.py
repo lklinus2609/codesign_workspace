@@ -1,13 +1,14 @@
 """
-BPTT Gradient Computation via jax.jacfwd (forward-mode AD) through mjx.step.
+BPTT Gradient Computation via jax.grad (reverse-mode AD) through mjx.step.
 
 Core differentiable physics evaluation for PGHC outer loop.
 Computes Cost of Transport (CoT) gradients w.r.t. morphology parameters theta.
 
-Uses forward-mode AD (jacfwd) instead of reverse-mode (grad) because MJX's
-constraint solver uses jax.lax.while_loop, which only supports forward-mode
-differentiation. With 6 design parameters, jacfwd makes 6 JVP passes —
-each analytically exact (not finite differences).
+Uses reverse-mode AD (jax.grad) with Newton solver iterations=1. A single
+Newton iteration acts as a linear solve — no jax.lax.while_loop, so
+reverse-mode works and gives the best gradient accuracy (cos_sim ~0.95
+vs FD). More iterations paradoxically give WORSE model-param gradients
+because additional nonlinear refinement has non-smooth pathways.
 """
 
 import jax
@@ -22,9 +23,9 @@ from g1_morphology import apply_theta
 def make_bptt_fns(mjx_model, mj_model, metadata):
     """Create BPTT loss and gradient functions.
 
-    Uses jax.jacfwd (forward-mode AD) for gradient computation. Forward-mode
-    works through jax.lax.while_loop in the Newton constraint solver, unlike
-    reverse-mode (jax.grad) which crashes.
+    Uses jax.grad (reverse-mode AD) for gradient computation. This works
+    because Newton solver is configured with iterations=1 (linear solve,
+    no while_loop). Gives cos_sim ~0.95 vs finite differences.
 
     Args:
         mjx_model: mjx.Model (base, before theta applied)
@@ -115,9 +116,8 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
             theta, actions_batch, init_qpos_batch)
         return jnp.mean(cots)
 
-    # Forward-mode gradient via jacfwd (works with while_loop in solver)
-    # For scalar output with 6 inputs, jacfwd makes 6 JVP passes
-    grad_fn_jit = jax.jit(jax.jacfwd(batched_mean_loss, argnums=0))
+    # Reverse-mode gradient (works with iterations=1, no while_loop)
+    grad_fn_jit = jax.jit(jax.grad(batched_mean_loss, argnums=0))
 
     # Batched forward-only (for info: forward_dist, energy, etc.)
     batched_loss_fn = jax.jit(jax.vmap(bptt_loss_with_info, in_axes=(None, 0, 0)))
@@ -132,7 +132,7 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
 def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
     """Compute mean BPTT gradient over a batch of rollouts.
 
-    Uses forward-mode AD (jacfwd) for exact analytical gradients.
+    Uses reverse-mode AD (jax.grad) for exact analytical gradients.
     Also runs a forward pass to get CoT info (forward_dist, energy).
 
     Args:
@@ -153,7 +153,7 @@ def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
     mean_cot = float(jnp.mean(cot_values))
     mean_fwd_dist = float(jnp.mean(infos["forward_dist"]))
 
-    # Gradient via forward-mode AD (jacfwd)
+    # Gradient via reverse-mode AD (jax.grad)
     mean_grad = bptt_fns["grad_fn"](theta, actions_batch, init_qpos_batch)
 
     # Guard against NaN/Inf

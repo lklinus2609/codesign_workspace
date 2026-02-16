@@ -571,7 +571,7 @@ def main(args):
         print(f"    Got actions: {actions_batch.shape}")
 
         # ----- BPTT Gradient -----
-        print(f"\n  [BPTT] Computing gradient via jacfwd(mjx.step)...")
+        print(f"\n  [BPTT] Computing gradient via jax.grad(mjx.step)...")
         t0_bptt = time.time()
 
         grad_theta_jax, mean_fwd_dist, mean_cot = compute_bptt_gradient(

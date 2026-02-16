@@ -53,14 +53,14 @@ def load_g1_model(mjcf_path=None):
 
     # Configure Newton solver for differentiable simulation:
     # - Newton (not CG): CG uses while_loop with dynamic termination
-    # - tolerance=0: triggers scan-based solver path in MJX (PR #2721),
-    #   enabling reverse-mode AD with multiple iterations
-    # - iterations=4: more iterations = better convergence = better gradients
-    #   (with tolerance=0, these are fixed iterations via jax.lax.scan)
+    # - iterations=1: single Newton step acts as a linear solve, which is
+    #   perfectly differentiable. More iterations (4+) paradoxically give
+    #   WORSE gradients through model params (cos_sim drops 0.95→0.50)
+    #   because additional nonlinear refinement has non-smooth pathways.
+    # - ls_iterations=4: line search within the single Newton step
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 4
+    mj_model.opt.iterations = 1
     mj_model.opt.ls_iterations = 4
-    mj_model.opt.tolerance = 0
 
     # Convert to MJX
     mjx_model = mjx.put_model(mj_model)

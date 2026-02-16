@@ -89,15 +89,15 @@ def compare(name, analytical, fd, compile_time=None):
 
 
 def run_diagnostic(name, loss_fn, theta, *extra_args, eps=1e-4):
-    """Compile, run jacfwd grad, run FD, compare."""
+    """Compile, run jax.grad, run FD, compare."""
     print(f"\n{'='*60}")
     print(f"  {name}")
     print(f"{'='*60}")
 
-    # JIT compile forward-mode gradient (jacfwd works through while_loop)
-    print(f"  Compiling jax.jacfwd...", flush=True)
+    # JIT compile reverse-mode gradient (works with Newton iterations=1)
+    print(f"  Compiling jax.grad...", flush=True)
     t0 = time.time()
-    grad_fn = jax.jit(jax.jacfwd(loss_fn, argnums=0))
+    grad_fn = jax.jit(jax.grad(loss_fn, argnums=0))
     analytical = np.asarray(grad_fn(theta, *extra_args).block_until_ready())
     compile_time = time.time() - t0
     print(f"  Compiled + ran in {compile_time:.1f}s", flush=True)
