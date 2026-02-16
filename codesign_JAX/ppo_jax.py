@@ -37,21 +37,21 @@ class MLP(nn.Module):
 
 class PolicyNetwork(nn.Module):
     """Gaussian policy: MLP mean + learned log_std."""
-    hidden_dims: Sequence[int] = (256, 256)
+    hidden_dims: Sequence[int] = (256, 128, 128)
     act_dim: int = 29
 
     @nn.compact
     def __call__(self, obs):
         mean = MLP((*self.hidden_dims, self.act_dim))(obs)
         # log_std as a learnable parameter (not input-dependent)
-        log_std = self.param("log_std", nn.initializers.constant(-0.22),
+        log_std = self.param("log_std", nn.initializers.constant(0.0),
                              (self.act_dim,))
         return mean, log_std
 
 
 class ValueNetwork(nn.Module):
     """Value function: MLP -> scalar."""
-    hidden_dims: Sequence[int] = (256, 256)
+    hidden_dims: Sequence[int] = (256, 128, 128)
 
     @nn.compact
     def __call__(self, obs):
@@ -74,14 +74,14 @@ class Transition(NamedTuple):
 
 
 class PPOConfig(NamedTuple):
-    """PPO hyperparameters."""
+    """PPO hyperparameters (IsaacLab G1 flat defaults)."""
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_ratio: float = 0.2
-    entropy_coeff: float = 0.01
-    value_coeff: float = 0.5
+    entropy_coeff: float = 0.008
+    value_coeff: float = 1.0
     max_grad_norm: float = 1.0
-    lr: float = 1e-4
+    lr: float = 1e-3
     n_epochs: int = 5
     num_minibatches: int = 4
     horizon: int = 24

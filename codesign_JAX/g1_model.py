@@ -131,14 +131,32 @@ def _extract_metadata(mj_model):
     # Pelvis body index (for termination)
     metadata["pelvis_body_index"] = body_names.get("pelvis", 0)
 
-    # Hip DOF indices (for hip_pos reward)
-    hip_dof_indices = []
-    for jname, jidx in joint_names.items():
-        if "hip" in jname and "pitch" not in jname:
-            # Get DOF address for this joint
-            dof_adr = mj_model.jnt_dofadr[jidx]
-            hip_dof_indices.append(dof_adr)
-    metadata["hip_dof_indices"] = jnp.array(hip_dof_indices, dtype=jnp.int32)
+    # Joint group DOF indices (for joint deviation rewards, IsaacLab-style)
+    # Each group maps joint name keywords to DOF addresses
+    def _get_dof_indices(keywords, exclude_keywords=None):
+        indices = []
+        for jname, jidx in joint_names.items():
+            if any(kw in jname for kw in keywords):
+                if exclude_keywords and any(kw in jname for kw in exclude_keywords):
+                    continue
+                indices.append(mj_model.jnt_dofadr[jidx])
+        return jnp.array(sorted(indices), dtype=jnp.int32)
+
+    # hip_yaw + hip_roll (not hip_pitch — that's a locomotion DOF)
+    metadata["hip_dof_indices"] = _get_dof_indices(
+        ["hip_yaw", "hip_roll"])
+    # waist/torso
+    metadata["torso_dof_indices"] = _get_dof_indices(
+        ["waist"])
+    # arms: shoulder + elbow + wrist
+    metadata["arm_dof_indices"] = _get_dof_indices(
+        ["shoulder", "elbow", "wrist"])
+    # hip + knee (for dof_acc penalty, matching IsaacLab)
+    metadata["leg_dof_indices"] = _get_dof_indices(
+        ["hip", "knee"])
+    # ankle (for dof_pos_limits)
+    metadata["ankle_dof_indices"] = _get_dof_indices(
+        ["ankle"])
 
     # Default qpos (for reset and relative observations)
     metadata["default_qpos"] = jnp.array(mj_model.qpos0.copy())

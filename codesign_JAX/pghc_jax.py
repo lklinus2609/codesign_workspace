@@ -292,14 +292,14 @@ def main(args):
     rng, rng_init = jax.random.split(rng)
 
     policy_params, value_params, policy_apply, value_apply = init_networks(
-        rng_init, obs_dim, act_dim, hidden_dims=(256, 256))
+        rng_init, obs_dim, act_dim, hidden_dims=(256, 128, 128))
 
     ppo_cfg = PPOConfig(
         gamma=0.99,
         gae_lambda=0.95,
         clip_ratio=0.2,
-        entropy_coeff=0.01,
-        value_coeff=0.5,
+        entropy_coeff=0.008,
+        value_coeff=1.0,
         max_grad_norm=1.0,
         lr=args.ppo_lr,
         n_epochs=5,
@@ -552,7 +552,7 @@ if __name__ == "__main__":
     # Inner loop (PPO)
     parser.add_argument("--num-envs", type=int, default=4096)
     parser.add_argument("--horizon", type=int, default=24)
-    parser.add_argument("--ppo-lr", type=float, default=1e-4)
+    parser.add_argument("--ppo-lr", type=float, default=1e-3)
     parser.add_argument("--max-inner-samples", type=int, default=200_000_000)
     parser.add_argument("--min-inner-iters", type=int, default=500)
     parser.add_argument("--stable-iters-required", type=int, default=50)
