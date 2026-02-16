@@ -6,6 +6,7 @@ Runs a series of increasingly complex tests to pinpoint the gradient issue:
   1. Pure quaternion math (should be perfect)
   2. apply_theta -> model.body_quat (tests PyTree replace)
   3. mjx.forward only (tests FK gradient w.r.t. model params)
+  3c. 1 mjx.step with contacts DISABLED (isolates contact contribution)
   4. 1 mjx.step (tests single step gradient)
   5. 20 mjx.steps WITHOUT jax.checkpoint
   6. 20 mjx.steps WITH jax.checkpoint
@@ -194,6 +195,31 @@ def main():
         "Test 3b: mjx.forward -> subtree_com[world, z]",
         forward_com_loss, theta, init_qpos)))
 
+    # ---- Test 3c: 1 mjx.step with contacts DISABLED ----
+    # Rebuild MJX model with contacts disabled to isolate contact contribution
+    print("\n  Building no-contact MJX model...", flush=True)
+    mj_model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
+    mjx_model_nc = mjx.put_model(mj_model)
+    mj_data_nc = mujoco.MjData(mj_model)
+    mujoco.mj_resetData(mj_model, mj_data_nc)
+    mujoco.mj_forward(mj_model, mj_data_nc)
+    template_data_nc = mjx.put_data(mj_model, mj_data_nc)
+    mj_model.opt.disableflags &= ~mujoco.mjtDisableBit.mjDSBL_CONTACT  # restore
+
+    def one_step_no_contact_loss(theta, actions, init_qpos):
+        model = apply_theta(mjx_model_nc, theta, base_body_quat,
+                           all_param_body_indices, param_for_body)
+        data = template_data_nc.replace(qpos=init_qpos, qvel=jnp.zeros(nv))
+        data = mjx.forward(model, data)
+        target = actions[0] * action_scale + default_dof_pos_act
+        data = data.replace(ctrl=target)
+        data = mjx.step(model, data)
+        return data.qpos[2]
+
+    results.append(("3c: 1 step (no contact)", run_diagnostic(
+        "Test 3c: 1 mjx.step NO CONTACTS -> qpos[2]",
+        one_step_no_contact_loss, theta, actions_20, init_qpos)))
+
     # ---- Test 4: 1 mjx.step -> qpos[2] ----
     def one_step_loss(theta, actions, init_qpos):
         model = apply_theta(mjx_model, theta, base_body_quat,
@@ -296,8 +322,8 @@ def main():
     print("\nInterpretation:")
     print("  - If Test 1-2 pass but 3 fails: mjx.forward doesn't propagate")
     print("    model param gradients through FK")
-    print("  - If Test 3 passes but 4 fails: mjx.step doesn't propagate")
-    print("    model param gradients")
+    print("  - If Test 3c passes but 4 fails: CONTACTS are the gradient issue")
+    print("  - If Test 3c also fails: integration/mass matrix is the issue")
     print("  - If Test 4 passes but 5 fails: gradient degrades over")
     print("    multiple steps (chaos/precision)")
     print("  - If Test 5 passes but 6 fails: jax.checkpoint is the issue")
