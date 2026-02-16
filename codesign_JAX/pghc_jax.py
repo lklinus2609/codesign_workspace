@@ -655,7 +655,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-envs", type=int, default=4096)
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--ppo-lr", type=float, default=1e-3)
-    parser.add_argument("--max-inner-samples", type=int, default=200_000_000)
+    parser.add_argument("--max-inner-samples", type=int, default=5_000_000_000)
     parser.add_argument("--min-inner-iters", type=int, default=2000)
     parser.add_argument("--stable-iters-required", type=int, default=50)
     parser.add_argument("--plateau-threshold", type=float, default=0.02)
