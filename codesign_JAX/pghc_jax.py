@@ -7,7 +7,7 @@ Main entry point implementing Algorithm 1 from the thesis:
         1. apply_theta -> update MJX model body quaternions
         2. PPO inner loop training until convergence
         3. Collect actions (frozen policy, deterministic)
-        4. Morphology gradient via finite differences through mjx.step
+        4. BPTT gradient via jax.grad through mjx.step
         5. Adam update theta, clip to +/-30 deg
         6. Log metrics, save checkpoint
         7. Check outer convergence
@@ -570,9 +570,8 @@ def main(args):
         )
         print(f"    Got actions: {actions_batch.shape}")
 
-        # ----- Morphology Gradient (Finite Differences) -----
-        print(f"\n  [FD Grad] Computing gradient via finite differences "
-              f"(13 forward passes)...")
+        # ----- BPTT Gradient -----
+        print(f"\n  [BPTT] Computing gradient via jax.grad(mjx.step)...")
         t0_bptt = time.time()
 
         grad_theta_jax, mean_fwd_dist, mean_cot = compute_bptt_gradient(
@@ -584,8 +583,8 @@ def main(args):
         fwd_dist = float(mean_fwd_dist)
         cot = float(mean_cot)
 
-        print(f"  [FD Grad] Done in {bptt_time:.1f}s")
-        print(f"    FD gradients:")
+        print(f"  [BPTT] Done in {bptt_time:.1f}s")
+        print(f"    BPTT gradients:")
         for i, name in enumerate(param_names):
             print(f"      d_CoT/d_{name} = {grad_theta[i]:+.6f}")
         print(f"    Forward distance = {fwd_dist:.3f} m")

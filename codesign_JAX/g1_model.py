@@ -51,11 +51,16 @@ def load_g1_model(mjcf_path=None):
     # Load MuJoCo model
     mj_model = mujoco.MjModel.from_xml_path(str(mjcf_path))
 
-    # Configure Newton solver (CG uses jax.lax.while_loop with dynamic
-    # termination which blocks reverse-mode differentiation)
+    # Configure Newton solver for differentiable simulation:
+    # - Newton (not CG): CG uses while_loop with dynamic termination
+    # - tolerance=0: triggers scan-based solver path in MJX (PR #2721),
+    #   enabling reverse-mode AD with multiple iterations
+    # - iterations=4: more iterations = better convergence = better gradients
+    #   (with tolerance=0, these are fixed iterations via jax.lax.scan)
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-    mj_model.opt.iterations = 1
+    mj_model.opt.iterations = 4
     mj_model.opt.ls_iterations = 4
+    mj_model.opt.tolerance = 0
 
     # Convert to MJX
     mjx_model = mjx.put_model(mj_model)
@@ -67,7 +72,8 @@ def load_g1_model(mjcf_path=None):
     print(f"  Bodies: {mj_model.nbody}, Joints: {mj_model.njnt}, "
           f"DOFs: {mj_model.nv}, Actuators: {mj_model.nu}")
     print(f"  Solver: Newton (iters={mj_model.opt.iterations}, "
-          f"ls_iters={mj_model.opt.ls_iterations})")
+          f"ls_iters={mj_model.opt.ls_iterations}, "
+          f"tol={mj_model.opt.tolerance})")
     print(f"  Timestep: {mj_model.opt.timestep}s")
 
     return mj_model, mjx_model, metadata
