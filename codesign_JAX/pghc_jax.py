@@ -27,6 +27,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import mujoco
 import numpy as np
 
 from g1_model import load_g1_model, NUM_DESIGN_PARAMS, SYMMETRIC_PAIRS
@@ -42,13 +43,89 @@ from utils import AdamOptimizer, RunningMeanStd, PGHCLogger
 
 
 # ---------------------------------------------------------------------------
+# Video recording (MuJoCo CPU renderer -> wandb)
+# ---------------------------------------------------------------------------
+
+def record_video(mj_model, env_fns, policy_apply, policy_params, obs_rms,
+                 rng, num_steps=200, width=480, height=360):
+    """Record a short video of the current policy using MuJoCo CPU renderer.
+
+    Args:
+        mj_model: mujoco.MjModel (CPU)
+        env_fns: environment functions dict
+        policy_apply: policy network apply function
+        policy_params: frozen policy parameters
+        obs_rms: observation normalizer
+        rng: PRNGKey
+        num_steps: number of simulation steps to record
+        width, height: video resolution
+
+    Returns:
+        frames: (T, H, W, 3) uint8 numpy array, or None if rendering fails
+    """
+    try:
+        renderer = mujoco.Renderer(mj_model, height=height, width=width)
+    except Exception:
+        return None
+
+    mj_data = mujoco.MjData(mj_model)
+
+    # Reset a single env and get initial qpos
+    rng, rng_reset = jax.random.split(rng)
+    env_state, obs = env_fns["reset_single"](rng_reset)
+
+    # Copy MJX state to CPU
+    mj_data.qpos[:] = np.asarray(env_state.mjx_data.qpos)
+    mj_data.qvel[:] = np.asarray(env_state.mjx_data.qvel)
+    mujoco.mj_forward(mj_model, mj_data)
+
+    # Camera setup: follow the robot from the side
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.distance = 3.0
+    cam.elevation = -20.0
+    cam.azimuth = 90.0
+
+    frames = []
+    # Render every Nth step (~50 fps at dt=0.002)
+    render_every = max(1, int(0.02 / mj_model.opt.timestep))
+
+    for step_i in range(num_steps):
+        # Get action from policy
+        obs_np = np.asarray(obs)[None]  # (1, obs_dim)
+        obs_norm = jnp.array(obs_rms.normalize(obs_np))[0]
+        action = deterministic_action(policy_apply, policy_params, obs_norm)
+
+        # Step environment (JAX)
+        env_state, obs, _, done, _ = env_fns["step_single"](env_state, action)
+
+        # Copy to CPU renderer
+        mj_data.qpos[:] = np.asarray(env_state.mjx_data.qpos)
+        mj_data.qvel[:] = np.asarray(env_state.mjx_data.qvel)
+        mujoco.mj_forward(mj_model, mj_data)
+
+        if step_i % render_every == 0:
+            # Track the robot's root position
+            cam.lookat[:] = mj_data.qpos[:3]
+            renderer.update_scene(mj_data, camera=cam)
+            frames.append(renderer.render().copy())
+
+    renderer.close()
+
+    if not frames:
+        return None
+    return np.stack(frames)  # (T, H, W, 3)
+
+
+# ---------------------------------------------------------------------------
 # Inner loop: PPO training
 # ---------------------------------------------------------------------------
 
 def run_inner_loop(env_fns, policy_params, value_params, opt_state,
                    ppo_train_fns, obs_rms, rng,
                    ppo_cfg, gate, max_samples=200_000_000,
-                   log_every=10, use_wandb=False, logger=None):
+                   log_every=10, use_wandb=False, logger=None,
+                   mj_model=None, video_every=100):
     """Train PPO until convergence or sample cap.
 
     Args:
@@ -64,6 +141,8 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
         log_every: print metrics every N rollouts
         use_wandb: whether to log to wandb
         logger: PGHCLogger instance
+        mj_model: mujoco.MjModel for video rendering (optional)
+        video_every: record video every N rollouts (0 to disable)
 
     Returns:
         policy_params, value_params, opt_state, obs_rms, metrics, converged
@@ -175,6 +254,27 @@ def run_inner_loop(env_fns, policy_params, value_params, opt_state,
                     "inner/approx_kl": float(ppo_info["approx_kl"]),
                     "inner/total_samples": total_samples,
                 })
+
+        # Record video to wandb
+        if (use_wandb and mj_model is not None and video_every > 0
+                and rollout_count % video_every == 0):
+            try:
+                import wandb
+                rng, rng_vid = jax.random.split(rng)
+                frames = record_video(
+                    mj_model, env_fns, policy_apply, policy_params,
+                    obs_rms, rng_vid, num_steps=500)
+                if frames is not None:
+                    # wandb expects (T, C, H, W) for Video
+                    vid = np.transpose(frames, (0, 3, 1, 2))
+                    logger.log({
+                        "inner/video": wandb.Video(vid, fps=50,
+                                                   format="mp4"),
+                    })
+                    print(f"      [Video] Logged {frames.shape[0]} frames "
+                          f"to wandb")
+            except Exception as e:
+                print(f"      [Video] Failed: {e}")
 
         if gate.is_converged():
             print(f"    [Inner] CONVERGED at rollout {rollout_count} "
@@ -408,6 +508,8 @@ def main(args):
             log_every=args.log_every,
             use_wandb=use_wandb,
             logger=logger,
+            mj_model=mj_model,
+            video_every=args.video_every,
         )
 
         inner_time = time.time() - t0
@@ -554,10 +656,11 @@ if __name__ == "__main__":
     parser.add_argument("--horizon", type=int, default=24)
     parser.add_argument("--ppo-lr", type=float, default=1e-3)
     parser.add_argument("--max-inner-samples", type=int, default=200_000_000)
-    parser.add_argument("--min-inner-iters", type=int, default=500)
+    parser.add_argument("--min-inner-iters", type=int, default=2000)
     parser.add_argument("--stable-iters-required", type=int, default=50)
     parser.add_argument("--plateau-threshold", type=float, default=0.02)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--video-every", type=int, default=100)
 
     # Eval / BPTT
     parser.add_argument("--num-eval-envs", type=int, default=32)
