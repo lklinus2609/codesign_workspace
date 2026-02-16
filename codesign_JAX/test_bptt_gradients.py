@@ -2,17 +2,22 @@
 """
 Finite Difference Validation of MJX BPTT Gradients.
 
-Compares jax.grad(CoT) against central finite differences for each
+Compares jax.grad(loss) against central finite differences for each
 of the 6 morphology parameters (theta). A passing test has FD ratios
 close to 1.0, indicating jax.grad through mjx.step is correct.
 
+All tests use a FIXED horizon (20 steps) to avoid repeated JIT
+compilations — each unique jax.lax.scan length triggers a full XLA
+recompilation (~2-3 min). By keeping the horizon constant, we compile
+jax.grad exactly once per loss function.
+
 Tests:
-  A: Single rollout, short horizon (5 steps), zero actions
-  B: Single rollout, short horizon (5 steps), random actions
-  C: Single rollout, medium horizon (20 steps), random actions
-  D: Single rollout, medium horizon (20 steps), policy-like actions
-  E: Gradient w.r.t. a simple loss (root height after N steps)
-  F: Batched gradient (multiple rollouts averaged)
+  A: Height loss, zero actions
+  B: Height loss, small random actions
+  C: Height loss, larger random actions
+  D: CoT loss, zero actions
+  E: CoT loss, small random actions
+  F: CoT loss, larger random actions
 """
 
 import sys
@@ -32,6 +37,9 @@ from g1_model import load_g1_model, NUM_DESIGN_PARAMS
 from g1_morphology import apply_theta
 from g1_bptt_jax import make_bptt_fns
 
+# Fixed horizon for ALL tests (avoids recompilation)
+HORIZON = 20
+
 
 def make_simple_loss_fn(mjx_model, mj_model, metadata):
     """Create a simple loss: root height after N steps. Easier to differentiate
@@ -40,7 +48,6 @@ def make_simple_loss_fn(mjx_model, mj_model, metadata):
     base_body_quat = metadata["base_body_quat"]
     all_param_body_indices = metadata["all_param_body_indices"]
     param_for_body = metadata["param_for_body"]
-    dt = metadata["timestep"]
     default_qpos = metadata["default_qpos"]
     nv = metadata["nv"]
     default_dof_pos_act = default_qpos[7:]
@@ -86,26 +93,24 @@ def fd_gradient(loss_fn, theta, *args, eps=1e-4):
     return grad
 
 
-def run_test(name, loss_fn, theta, actions, init_qpos, eps=1e-4):
-    """Run a single gradient validation test."""
+def run_test(name, grad_fn_jit, loss_fn_jit, theta, actions, init_qpos,
+             eps=1e-4):
+    """Run a single gradient validation test using pre-compiled functions."""
     print(f"\n{'='*60}")
     print(f"Test {name}")
     print(f"{'='*60}")
 
-    # Analytical gradient via jax.grad
-    print(f"  [1/2] Computing jax.grad (JIT compiling on first call)...",
-          flush=True)
+    # Analytical gradient via pre-compiled jax.grad
+    print(f"  [1/2] Computing jax.grad (already JIT compiled)...", flush=True)
     t0 = time.time()
-    grad_fn = jax.grad(loss_fn, argnums=0)
-    grad_analytical = np.asarray(grad_fn(theta, actions, init_qpos))
+    grad_analytical = np.asarray(grad_fn_jit(theta, actions, init_qpos))
     t_analytical = time.time() - t0
     print(f"  [1/2] Done in {t_analytical:.1f}s")
 
-    # Finite difference gradient
-    print(f"  [2/2] Computing FD gradient (12 forward passes)...",
-          flush=True)
+    # Finite difference gradient using pre-compiled forward fn
+    print(f"  [2/2] Computing FD gradient (12 forward passes)...", flush=True)
     t0 = time.time()
-    grad_fd = fd_gradient(loss_fn, theta, actions, init_qpos, eps=eps)
+    grad_fd = fd_gradient(loss_fn_jit, theta, actions, init_qpos, eps=eps)
     t_fd = time.time() - t0
     print(f"  [2/2] Done in {t_fd:.1f}s")
 
@@ -162,22 +167,23 @@ def main():
 
     print(f"\nJAX devices: {jax.devices()}")
     print(f"JAX backend: {jax.default_backend()}")
+    print(f"Fixed horizon: {HORIZON} steps (all tests use same shape "
+          f"to avoid recompilation)")
 
     # Load model
     print("\nLoading G1 model...")
     mj_model, mjx_model, metadata = load_g1_model()
 
-    nq = metadata["nq"]
-    nv = metadata["nv"]
     default_qpos = metadata["default_qpos"]
+    num_act = metadata["num_actuators"]
 
     # Create BPTT functions (CoT loss)
     bptt_fns = make_bptt_fns(mjx_model, mj_model, metadata)
-    cot_loss_fn = bptt_fns["loss_with_info_fn"]
+    cot_loss_info_fn = bptt_fns["loss_with_info_fn"]
 
     # Scalar CoT loss (drops info)
     def cot_loss(theta, actions, init_qpos):
-        cot, _ = cot_loss_fn(theta, actions, init_qpos)
+        cot, _ = cot_loss_info_fn(theta, actions, init_qpos)
         return cot
 
     # Simple height loss
@@ -188,57 +194,87 @@ def main():
     theta = jnp.array([0.05, -0.03, 0.02, -0.04, 0.01, -0.02])
     init_qpos = default_qpos
 
-    # Warmup: JIT compile the forward pass with a tiny rollout
-    print("\nWarmup: JIT compiling forward pass...", flush=True)
-    t0 = time.time()
-    warmup_actions = jnp.zeros((3, metadata["num_actuators"]))
-    _ = height_loss_fn(theta, warmup_actions, init_qpos)
-    print(f"Warmup forward done in {time.time() - t0:.1f}s", flush=True)
+    # ---------------------------------------------------------------
+    # One-time JIT compilation for BOTH loss functions at fixed horizon
+    # This is the slow part (~2-3 min each), but only happens ONCE.
+    # ---------------------------------------------------------------
+    warmup_actions = jnp.zeros((HORIZON, num_act))
 
-    print("Warmup: JIT compiling jax.grad...", flush=True)
+    print(f"\n[Compile 1/4] JIT compiling height_loss forward "
+          f"({HORIZON} steps)...", flush=True)
     t0 = time.time()
-    _ = jax.grad(height_loss_fn)(theta, warmup_actions, init_qpos)
-    print(f"Warmup grad done in {time.time() - t0:.1f}s", flush=True)
+    height_loss_jit = jax.jit(height_loss_fn)
+    _ = height_loss_jit(theta, warmup_actions, init_qpos).block_until_ready()
+    print(f"[Compile 1/4] Done in {time.time() - t0:.1f}s", flush=True)
+
+    print(f"[Compile 2/4] JIT compiling jax.grad(height_loss) "
+          f"({HORIZON} steps)...", flush=True)
+    t0 = time.time()
+    height_grad_jit = jax.jit(jax.grad(height_loss_fn, argnums=0))
+    _ = height_grad_jit(theta, warmup_actions, init_qpos).block_until_ready()
+    print(f"[Compile 2/4] Done in {time.time() - t0:.1f}s", flush=True)
+
+    print(f"[Compile 3/4] JIT compiling cot_loss forward "
+          f"({HORIZON} steps)...", flush=True)
+    t0 = time.time()
+    cot_loss_jit = jax.jit(cot_loss)
+    _ = cot_loss_jit(theta, warmup_actions, init_qpos).block_until_ready()
+    print(f"[Compile 3/4] Done in {time.time() - t0:.1f}s", flush=True)
+
+    print(f"[Compile 4/4] JIT compiling jax.grad(cot_loss) "
+          f"({HORIZON} steps)...", flush=True)
+    t0 = time.time()
+    cot_grad_jit = jax.jit(jax.grad(cot_loss, argnums=0))
+    _ = cot_grad_jit(theta, warmup_actions, init_qpos).block_until_ready()
+    print(f"[Compile 4/4] Done in {time.time() - t0:.1f}s", flush=True)
+
+    print("\nAll JIT compilations done. Running tests (no more recompilation).")
 
     results = []
 
-    # ----- Test A: Height loss, 5 steps, zero actions -----
-    actions_zero_5 = jnp.zeros((5, metadata["num_actuators"]))
-    ok, cos = run_test("A: Height loss, 5 steps, zero actions",
-                       height_loss_fn, theta, actions_zero_5, init_qpos)
+    # Generate action arrays (all same shape = HORIZON x num_act)
+    actions_zero = jnp.zeros((HORIZON, num_act))
+
+    rng, rng_a, rng_b = jax.random.split(rng, 3)
+    actions_small = jax.random.uniform(rng_a, (HORIZON, num_act),
+                                        minval=-0.3, maxval=0.3)
+    actions_large = jax.random.uniform(rng_b, (HORIZON, num_act),
+                                        minval=-0.8, maxval=0.8)
+
+    # ----- Test A: Height loss, zero actions -----
+    ok, cos = run_test("A: Height loss, zero actions",
+                       height_grad_jit, height_loss_jit,
+                       theta, actions_zero, init_qpos)
     results.append(("A", ok, cos))
 
-    # ----- Test B: Height loss, 5 steps, random actions -----
-    rng, rng_act = jax.random.split(rng)
-    actions_rand_5 = jax.random.uniform(rng_act,
-                                         (5, metadata["num_actuators"]),
-                                         minval=-0.5, maxval=0.5)
-    ok, cos = run_test("B: Height loss, 5 steps, random actions",
-                       height_loss_fn, theta, actions_rand_5, init_qpos)
+    # ----- Test B: Height loss, small random actions -----
+    ok, cos = run_test("B: Height loss, small random actions",
+                       height_grad_jit, height_loss_jit,
+                       theta, actions_small, init_qpos)
     results.append(("B", ok, cos))
 
-    # ----- Test C: Height loss, 20 steps, random actions -----
-    rng, rng_act = jax.random.split(rng)
-    actions_rand_20 = jax.random.uniform(rng_act,
-                                          (20, metadata["num_actuators"]),
-                                          minval=-0.3, maxval=0.3)
-    ok, cos = run_test("C: Height loss, 20 steps, random actions",
-                       height_loss_fn, theta, actions_rand_20, init_qpos)
+    # ----- Test C: Height loss, large random actions -----
+    ok, cos = run_test("C: Height loss, large random actions",
+                       height_grad_jit, height_loss_jit,
+                       theta, actions_large, init_qpos)
     results.append(("C", ok, cos))
 
-    # ----- Test D: CoT loss, 5 steps, zero actions -----
-    ok, cos = run_test("D: CoT loss, 5 steps, zero actions",
-                       cot_loss, theta, actions_zero_5, init_qpos)
+    # ----- Test D: CoT loss, zero actions -----
+    ok, cos = run_test("D: CoT loss, zero actions",
+                       cot_grad_jit, cot_loss_jit,
+                       theta, actions_zero, init_qpos)
     results.append(("D", ok, cos))
 
-    # ----- Test E: CoT loss, 5 steps, random actions -----
-    ok, cos = run_test("E: CoT loss, 5 steps, random actions",
-                       cot_loss, theta, actions_rand_5, init_qpos)
+    # ----- Test E: CoT loss, small random actions -----
+    ok, cos = run_test("E: CoT loss, small random actions",
+                       cot_grad_jit, cot_loss_jit,
+                       theta, actions_small, init_qpos)
     results.append(("E", ok, cos))
 
-    # ----- Test F: CoT loss, 20 steps, random actions -----
-    ok, cos = run_test("F: CoT loss, 20 steps, random actions",
-                       cot_loss, theta, actions_rand_20, init_qpos,
+    # ----- Test F: CoT loss, large random actions -----
+    ok, cos = run_test("F: CoT loss, large random actions",
+                       cot_grad_jit, cot_loss_jit,
+                       theta, actions_large, init_qpos,
                        eps=5e-5)
     results.append(("F", ok, cos))
 
