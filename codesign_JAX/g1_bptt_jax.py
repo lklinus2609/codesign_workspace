@@ -1,11 +1,13 @@
 """
-BPTT Gradient Computation via jax.grad through mjx.step.
+BPTT Gradient Computation via jax.jacfwd (forward-mode AD) through mjx.step.
 
 Core differentiable physics evaluation for PGHC outer loop.
 Computes Cost of Transport (CoT) gradients w.r.t. morphology parameters theta.
 
-Requires Newton solver with tolerance=0 (scan-based solver path) for correct
-reverse-mode AD through model parameters. See g1_model.py for solver config.
+Uses forward-mode AD (jacfwd) instead of reverse-mode (grad) because MJX's
+constraint solver uses jax.lax.while_loop, which only supports forward-mode
+differentiation. With 6 design parameters, jacfwd makes 6 JVP passes —
+each analytically exact (not finite differences).
 """
 
 import jax
@@ -20,13 +22,17 @@ from g1_morphology import apply_theta
 def make_bptt_fns(mjx_model, mj_model, metadata):
     """Create BPTT loss and gradient functions.
 
+    Uses jax.jacfwd (forward-mode AD) for gradient computation. Forward-mode
+    works through jax.lax.while_loop in the Newton constraint solver, unlike
+    reverse-mode (jax.grad) which crashes.
+
     Args:
         mjx_model: mjx.Model (base, before theta applied)
         mj_model: mujoco.MjModel (for creating initial data)
         metadata: dict from g1_model.load_g1_model()
 
     Returns:
-        dict with 'loss_with_info_fn', 'grad_fn', 'batched_grad_fn'
+        dict with 'loss_with_info_fn', 'grad_fn', 'batched_loss_fn'
     """
     base_body_quat = metadata["base_body_quat"]
     all_param_body_indices = metadata["all_param_body_indices"]
@@ -41,7 +47,6 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
     action_scale = 0.25  # matches env config
 
     # Create template data on CPU, then put to device once
-    # (avoids calling mjx.make_data inside traced code)
     mj_data = mujoco.MjData(mj_model)
     mujoco.mj_resetData(mj_model, mj_data)
     mujoco.mj_forward(mj_model, mj_data)
@@ -63,7 +68,7 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
         model = apply_theta(mjx_model, theta, base_body_quat,
                            all_param_body_indices, param_for_body)
 
-        # 2. Initialize state from template (avoid mjx.make_data in traced code)
+        # 2. Initialize state from template
         data = template_data.replace(qpos=init_qpos, qvel=jnp.zeros(nv))
         data = mjx.forward(model, data)
 
@@ -99,23 +104,27 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
         }
         return cot, info
 
-    # has_aux=True: grad of cot, carry info through as auxiliary output
-    # This avoids a redundant second forward pass to get info
-    grad_fn = jax.value_and_grad(bptt_loss_with_info, argnums=0, has_aux=True)
+    # Scalar loss (drops info) for gradient computation
+    def bptt_scalar_loss(theta, actions, init_qpos):
+        cot, _ = bptt_loss_with_info(theta, actions, init_qpos)
+        return cot
 
-    # Batched: vmap over (actions, init_qpos), shared theta
-    batched_grad_fn = jax.vmap(grad_fn, in_axes=(None, 0, 0))
+    # Batched mean loss: vmap over eval envs, return mean CoT
+    def batched_mean_loss(theta, actions_batch, init_qpos_batch):
+        cots = jax.vmap(bptt_scalar_loss, in_axes=(None, 0, 0))(
+            theta, actions_batch, init_qpos_batch)
+        return jnp.mean(cots)
 
-    # JIT the full batched computation for faster subsequent calls
-    batched_grad_fn_jit = jax.jit(batched_grad_fn)
+    # Forward-mode gradient via jacfwd (works with while_loop in solver)
+    # For scalar output with 6 inputs, jacfwd makes 6 JVP passes
+    grad_fn_jit = jax.jit(jax.jacfwd(batched_mean_loss, argnums=0))
 
-    # Also expose a batched forward-only fn (for FD fallback if needed)
+    # Batched forward-only (for info: forward_dist, energy, etc.)
     batched_loss_fn = jax.jit(jax.vmap(bptt_loss_with_info, in_axes=(None, 0, 0)))
 
     return {
         "loss_with_info_fn": bptt_loss_with_info,
-        "grad_fn": grad_fn,
-        "batched_grad_fn": batched_grad_fn_jit,
+        "grad_fn": grad_fn_jit,
         "batched_loss_fn": batched_loss_fn,
     }
 
@@ -123,7 +132,8 @@ def make_bptt_fns(mjx_model, mj_model, metadata):
 def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
     """Compute mean BPTT gradient over a batch of rollouts.
 
-    Single forward+backward pass via value_and_grad with has_aux=True.
+    Uses forward-mode AD (jacfwd) for exact analytical gradients.
+    Also runs a forward pass to get CoT info (forward_dist, energy).
 
     Args:
         bptt_fns: dict from make_bptt_fns()
@@ -136,15 +146,15 @@ def compute_bptt_gradient(bptt_fns, theta, actions_batch, init_qpos_batch):
         mean_fwd_dist: scalar mean forward distance
         mean_cot: scalar mean Cost of Transport
     """
-    # Single pass: (cot_values, infos), grads — no redundant forward pass
-    (cot_values, infos), grads = bptt_fns["batched_grad_fn"](
+    # Forward pass for info (forward_dist, energy, etc.)
+    cot_values, infos = bptt_fns["batched_loss_fn"](
         theta, actions_batch, init_qpos_batch
     )
+    mean_cot = float(jnp.mean(cot_values))
+    mean_fwd_dist = float(jnp.mean(infos["forward_dist"]))
 
-    # Average gradients across batch
-    mean_grad = jnp.mean(grads, axis=0)
-    mean_fwd_dist = jnp.mean(infos["forward_dist"])
-    mean_cot = jnp.mean(cot_values)
+    # Gradient via forward-mode AD (jacfwd)
+    mean_grad = bptt_fns["grad_fn"](theta, actions_batch, init_qpos_batch)
 
     # Guard against NaN/Inf
     has_bad = jnp.any(jnp.isnan(mean_grad)) | jnp.any(jnp.isinf(mean_grad))
