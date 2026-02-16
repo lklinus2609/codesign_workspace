@@ -198,13 +198,13 @@ def main():
     # ---- Test 3c: 1 mjx.step with contacts DISABLED ----
     # Rebuild MJX model with contacts disabled to isolate contact contribution
     print("\n  Building no-contact MJX model...", flush=True)
-    mj_model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_CONTACT
+    mj_model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
     mjx_model_nc = mjx.put_model(mj_model)
     mj_data_nc = mujoco.MjData(mj_model)
     mujoco.mj_resetData(mj_model, mj_data_nc)
     mujoco.mj_forward(mj_model, mj_data_nc)
     template_data_nc = mjx.put_data(mj_model, mj_data_nc)
-    mj_model.opt.disableflags &= ~mujoco.mjtDisableBit.mjDSBL_CONTACT  # restore
+    mj_model.opt.disableflags &= ~int(mujoco.mjtDisableBit.mjDSBL_CONTACT)  # restore
 
     def one_step_no_contact_loss(theta, actions, init_qpos):
         model = apply_theta(mjx_model_nc, theta, base_body_quat,
