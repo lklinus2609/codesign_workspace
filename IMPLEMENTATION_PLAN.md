@@ -328,32 +328,31 @@ def main():
 
 | Risk | Mitigation |
 |------|------------|
-| MuJoCo solver doesn't support BPTT | Use SolverSemiImplicit for outer loop only |
+| MuJoCo solver doesn't support BPTT | Adopted FD for outer loop (BPTT abandoned due to contact instability) |
 | Joint parameter changes break simulation | Careful validation, small learning rate |
 | Policy doesn't transfer to new morphology | Smaller outer loop frequency, warmup period |
 | Gradient explosion | Gradient clipping, learning rate scheduling |
-| Contact force explosion in diff sim | **Use short horizon (≤3 steps) before ground contact** |
+| Contact force explosion in diff sim | **BPTT abandoned; using closed-loop FD instead** |
 
 ## Known Limitations
 
-### Contact Force Instability in Differentiable Simulation
+### Contact Force Instability in Differentiable Simulation → FD Adopted
 **Discovered:** 2026-01-24
-**Status:** Workaround in place
+**Resolved:** 2026-02-19 — BPTT abandoned in favor of finite differences
 
 When using `SolverSemiImplicit` for BPTT through the G1 robot:
 - Steps 0-2: Simulation is stable (robot falling freely)
 - Steps 3-4: Robot feet contact ground → forces explode → NaN
 
-**Current Workaround:**
-- Use `diff_horizon: 3` (before contact)
-- Gradients still flow through pre-contact dynamics
-- Design parameter updates are based on early trajectory behavior
+Additionally, MJX's `mjx.step` does not correctly propagate gradients through
+model parameters (constraint solver/contact Jacobian not differentiable w.r.t.
+body_quat), blocking the JAX-based BPTT path as well.
 
-**Potential Future Solutions:**
-1. Implement contact-aware differentiable solver
-2. Use finite difference gradients instead of BPTT
-3. Use implicit differentiation through contact
-4. Start robot in mid-air with controlled descent
+**Adopted Solution: Closed-loop Finite Differences**
+- Central FD with paired-seed averaging replaces BPTT for outer loop gradients
+- Frozen policy evaluated closed-loop on perturbed morphologies
+- Avoids all contact instability issues (no gradient flow through physics)
+- Implemented in `codesign_g1_unified.py: compute_fd_gradient_distributed()`
 
 ## Success Criteria
 
@@ -450,35 +449,28 @@ Sync Mechanism:
 
 ## Future Work (Requires Research)
 
-### Contact-Stable Differentiable Simulation
+### Improving FD Gradient Signal
 **Priority:** High
-**Status:** Documented for future revision
-**Date Identified:** 2026-01-24
+**Date Identified:** 2026-02-19
 
-**Problem:**
-The `SolverSemiImplicit` solver used for BPTT in the outer loop cannot handle ground contact forces stably. When the G1 robot's feet contact the ground (around step 3-4 of simulation), the contact forces explode, causing NaN gradients. This limits the differentiable rollout horizon to ≤3 steps (before contact).
+**Background:**
+BPTT was abandoned due to contact force instability in `SolverSemiImplicit` (NaN
+after ~3 steps) and MJX's inability to differentiate `mjx.step` w.r.t. model
+parameters. Closed-loop FD was adopted as the outer loop gradient method.
 
-**Current Workaround:**
-- `diff_horizon: 3` in config
-- Gradients computed only from pre-contact dynamics (free-fall trajectory)
-- Design parameter updates based on early trajectory behavior
+**Current Limitations of FD:**
+- Frozen-policy FD captures only direct mechanical effect (∂reward/∂θ|_π),
+  missing the policy adaptation term
+- Gradient magnitude can be small (~0.001), requiring careful tuning of
+  FD epsilon, number of seeds, and eval horizon
+- Paired-seed averaging reduces variance but increases rollout count
 
-**Impact:**
-- Outer loop only optimizes for pre-contact dynamics
-- Cannot directly optimize for walking stability or ground reaction forces
-- May limit the effectiveness of morphology optimization
-
-**Potential Solutions to Investigate:**
-1. **Contact-aware differentiable solver**: Research Newton's roadmap for contact-stable BPTT
-2. **Finite difference gradients**: Replace BPTT with numerical gradient estimation (slower but stable)
-3. **Implicit differentiation**: Use implicit function theorem to differentiate through contact
-4. **Randomized smoothing**: Add noise to smooth contact discontinuities
-5. **Contact-free initial states**: Start robot mid-air with controlled descent trajectories
-
-**References:**
-- "Differentiable Physics and Stable Long-Horizon Rollouts" (relevant literature)
-- Newton documentation on SolverSemiImplicit limitations
-- MuJoCo's approach to differentiable contact
+**Potential Improvements:**
+1. **Larger FD epsilon**: Trade bias for signal strength
+2. **More seeds**: Reduce variance of gradient estimate
+3. **Longer eval horizon**: Capture more of the morphology's effect
+4. **Reward shaping**: Align inner loop reward with outer loop objective (power penalty)
+5. **Policy fine-tuning per perturbation**: Short adaptation before FD eval (expensive but more accurate)
 
 ---
 

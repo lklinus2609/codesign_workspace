@@ -31,8 +31,10 @@ Implementing Algorithm 1: **Performance-Gated Hybrid Co-Design (PGHC)** from the
 - Key classes:
   - `newton.ModelBuilder` - Build simulation models
   - `newton.solvers.SolverMuJoCo` - MuJoCo-based solver (used by MimicKit)
-  - `newton.solvers.SolverSemiImplicit` - Differentiable solver for BPTT
-- Differentiable simulation requires:
+  - `newton.solvers.SolverSemiImplicit` - Differentiable solver (BPTT abandoned due to contact instability)
+- BPTT was abandoned: `SolverSemiImplicit` contact forces explode after ~3 steps (NaN gradients).
+  Outer loop now uses closed-loop finite differences instead.
+- Legacy differentiable simulation API (no longer used for outer loop):
   - `model = builder.finalize(requires_grad=True)`
   - `wp.Tape()` for recording forward pass
   - `tape.backward(loss)` for gradients
@@ -134,8 +136,8 @@ codesign/
 ### Newton Engine Limitations
 1. Current `newton_engine.py` sets `requires_grad=False` (line 370)
    - Must modify to support differentiable mode for outer loop
-2. MuJoCo solver may not support full BPTT
-   - Consider using `SolverSemiImplicit` for outer loop rollouts
+2. BPTT abandoned due to contact instability in `SolverSemiImplicit`
+   - Outer loop uses closed-loop finite differences instead
 3. Joint transforms are set at finalization
    - Need mechanism to update `joint_X_p` tensor without rebuilding
 
