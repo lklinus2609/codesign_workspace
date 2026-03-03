@@ -1,0 +1,16 @@
+Conference papers (5 or 6)
+CORL 2026 - Codesign
+Humanoid 2027 - Design Optimization
+IROS 2027 - Robot head system itng.
+ICRA 2027 or CORL 2027 - Robot head control via RL
+TBD 2028 - Robot head control paper 2
+TBD 2029 - ???
+
+AIM, CoRL, RSS, HRI, RO-MAN, Humanoids, ICRA/IROS
+
+Journal papers (1 or 2)
+RA-L (journal): Humanoid Head
+RA-L 2027 (journal):
+Codesign + Design Optimization + Hardware (mini-biped) + system intg (end-to-end).
+
+RA-L, T-MECH, IJHR, T-RO, RAM, RAS, Science?
