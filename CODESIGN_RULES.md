@@ -58,7 +58,7 @@ codesign/
 - **Default window**: 30 outputs (raised from 10 after observing premature trigger
   at inner CoT 0.460 vs baseline asymptote 0.419 → ~9% policy headroom unexploited,
   envelope-theorem assumption broken).
-- **Default thresholds**: `--inner-cot-plateau-threshold 0.001`,
+- **Default thresholds**: `--inner-cot-plateau-threshold 0.0005`,
   `--task-plateau-threshold 0.02`.
 - **Calibration**: monitor `gate/cot_slope_rel` in wandb. If it floors above the
   configured threshold even at long inner times, the slope estimator's noise floor
