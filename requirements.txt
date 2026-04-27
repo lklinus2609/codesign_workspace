@@ -24,4 +24,5 @@ warp-lang
 moviepy
 pyglet
 mujoco-warp
+cma
 -e ./newton
